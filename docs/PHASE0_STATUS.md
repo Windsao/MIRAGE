@@ -117,6 +117,20 @@ The full RLinf-VLA → OpenVLA-OFT → LIBERO-Spatial pipeline runs cleanly on o
 ### Phase 1.0 — verdict: ✅ PASSED (2026-05-19)
 Show-o2-1.5B loads from local weights, runs Wan-VAE + multimodal embedding + `mmu_generate` end-to-end, returns coherent caption on the demo image. The meta-parameter warnings emitted during weight load were cosmetic (output is sensible). `mirage_showo_venv` (transformers 4.47 + diffusers 0.31 + flash-attn 2.7) works alongside `mirage_venv` (transformers 4.40 + RLinf + OFT) without conflict. Print-caption smoke at `scripts/phase1_0_print_caption.{py,sh}` is the reusable inference scaffold for Phase 1.1.
 
+### Phase 1.4 — verdict: ✅ PASSED (2026-05-19)
+End-to-end GRPO math closes on Show-o2-1.5B with synthetic data:
+```
+input shape: (4, 811, 1536)              # 4 trajectories, 56 action tokens + 755-token prefix
+per-trajectory log-probs: [-671.8, -661.3, -682.1, -697.6]
+rewards (Bernoulli(0.5)): [0, 1, 1, 0]
+GRPO loss: -5.623
+grad_norm (after clip_grad_norm to 1.0): 3776   # pre-clip; raw unclipped grad is huge
+optimizer step: complete, no NaN/inf
+```
+**Note on grad_norm**: 3776 pre-clip is large but finite. Expected because (a) `log_softmax` is over a 151k-token vocab and the action-token log-probs are deep in the tail (so any move shifts the rest), (b) we're back-propagating through the *full* Show-o2 model with no LoRA. With LoRA-adapter training in Phase 2 this will be much smaller.
+
+Stack: `mirage.policy.ActionTokenizer` (last 256 vocab IDs as action bins, OpenVLA convention) + `scripts/phase1_4_grpo_step.py` (smoke). Two-venv split confirmed viable.
+
 ### Blockers handled
 - hemera/nyx require slurm-allocated job for SSH access (`pam_slurm_adopt`). ✅ `salloc -p all -N 1 -w nyx --gres=gpu:a40:4 --time=02:00:00 --no-shell` granted job 17688 → `ssh nyx` now works directly.
 - erebus had only 2 GPUs idle (1,2 occupied by another user) — insufficient for RLinf's 4-rank default.
