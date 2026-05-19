@@ -173,19 +173,30 @@ def main() -> None:
     input_embeds = torch.cat([prefix_batched, action_embeds], dim=1)
     L_prefix = prefix_batched.shape[1]
 
-    # Attention mask: omni-style for the prefix, all-ones for actions.
+    # Attention mask:
+    #   omni_attn_mask_naive returns [B, 1, L, L] additive mask (0 attended,
+    #   iinfo.min masked) when inverted=True.
+    # Build a fresh [GROUP_SIZE, 1, L_total, L_total] additive mask that:
+    #   - reproduces the omni prefix mask on the prefix block,
+    #   - lets every action position attend to the full prefix,
+    #   - causally attends to earlier action positions.
+    L_total = input_embeds.shape[1]
     prefix_attn = omni_attn_mask_naive(
         B=1, LEN=L_prefix, modalities=modality_positions, device=device, inverted=True,
-    )                                                       # [1, L_prefix, L_prefix]
-    prefix_attn = prefix_attn.expand(GROUP_SIZE, -1, -1)
-    # Expand to [N, L_total, L_total]; actions attend causally to everything before.
-    L_total = input_embeds.shape[1]
-    attn = torch.zeros(GROUP_SIZE, L_total, L_total, device=device, dtype=prefix_attn.dtype)
-    attn[:, :L_prefix, :L_prefix] = prefix_attn
-    # actions row block: each action token sees the full prefix + previous actions (causal)
-    causal = torch.tril(torch.ones(NUM_ACTION_TOKENS, NUM_ACTION_TOKENS, device=device))
-    attn[:, L_prefix:, :L_prefix] = 1.0
-    attn[:, L_prefix:, L_prefix:] = causal
+    )                                                       # [1, 1, L_prefix, L_prefix]
+    neg = torch.iinfo(torch.long).min
+    # Start fully unmasked, then set the prefix block from the omni mask and
+    # paint masking on the upper triangle of the action block.
+    attn = torch.zeros(GROUP_SIZE, 1, L_total, L_total, device=device, dtype=torch.long)
+    attn[:, :, :L_prefix, :L_prefix] = prefix_attn.expand(GROUP_SIZE, -1, -1, -1)
+    # Action rows attend freely to the prefix (left of their column), and
+    # causally among themselves (upper-tri inside the action block is masked).
+    action_causal = torch.triu(
+        torch.full((NUM_ACTION_TOKENS, NUM_ACTION_TOKENS), neg, device=device, dtype=torch.long),
+        diagonal=1,
+    )
+    attn[:, :, L_prefix:, L_prefix:] = action_causal
+    # cast to model dtype so the additive mask plays well with bf16/fp16 paths.
     attn = attn.to(input_embeds.dtype)
 
     # -- Forward through the underlying Qwen LM ---------------------------
