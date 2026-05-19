@@ -102,13 +102,15 @@ Available LIBERO suites in configs: `libero_spatial`, `libero_object`, `libero_g
 - ✅ Confirmed `rlinf`, `prismatic`, `mani_skill`, `libero` all import cleanly.
 
 ### Launch attempts
-1. **smoke1** (CUDA_VISIBLE_DEVICES=3, single GPU): CUDA OOM. RLinf auto-spawned 4 Ray RolloutGroup workers, all tried to load 7B OpenVLA-OFT (~14 GB params) on the same 48 GB A40 → 56 GB demand. Failed at `model.to(cuda)` call in `huggingface_worker.py:100`.
-2. **smoke2** (CUDA_VISIBLE_DEVICES=0,3, 2 idle GPUs on erebus, `env.train.total_num_envs=4`, `env.eval.total_num_envs=4`, max_epochs=1, rollout_epoch=2, group_size=2): in flight.
+1. **smoke1** (erebus, CUDA_VISIBLE_DEVICES=3, single GPU): CUDA OOM. RLinf auto-spawned 4 Ray RolloutGroup workers, all tried to load 7B OpenVLA-OFT (~14 GB params) on the same 48 GB A40 → 56 GB demand. Failed at `model.to(cuda)` call in `huggingface_worker.py:100`.
+2. **smoke2** (erebus, CUDA_VISIBLE_DEVICES=0,3, total_num_envs=4): config validation error — `total_num_envs // env_world_size // pipeline_stage_num` must be divisible by `group_size`.
+3. **smoke3** (erebus, CUDA_VISIBLE_DEVICES=0,3, total_num_envs=16): still OOM. RLinf's `FlexiblePlacementStrategy` hardcodes 4 ranks regardless of CUDA_VISIBLE_DEVICES → 4 workers on 2 GPUs → 2 workers per GPU → OOM.
+4. **phase0_nyx** (nyx, full 4 A40 via slurm job 17688, default batch sizes, max_epochs=2): in flight.
 
 ### Blockers handled
-- hemera/nyx require slurm-allocated job for SSH access (`pam_slurm_adopt` denies otherwise). Sticking to erebus for now.
-- erebus has only GPUs 0 and 3 idle (1,2 are 42 GB used by another user).
-- Single-GPU mode would need RLinf config patch to force `num_rollout_workers=1` — punted until needed.
+- hemera/nyx require slurm-allocated job for SSH access (`pam_slurm_adopt`). ✅ `salloc -p all -N 1 -w nyx --gres=gpu:a40:4 --time=02:00:00 --no-shell` granted job 17688 → `ssh nyx` now works directly.
+- erebus had only 2 GPUs idle (1,2 occupied by another user) — insufficient for RLinf's 4-rank default.
+- RLinf hardcodes 4 ranks even with `CUDA_VISIBLE_DEVICES` overriding GPU count — need full-node allocation. (Or patch `FlexiblePlacementStrategy`; deferred.)
 
 ### Next gate
 - If smoke2 passes (full pipeline runs end-to-end without OOM, even briefly): proceed to a full LIBERO-Spatial GRPO run with default batch sizes — Phase 0 considered passed.
