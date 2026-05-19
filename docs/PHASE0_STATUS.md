@@ -93,14 +93,26 @@ Key specs:
 
 Available LIBERO suites in configs: `libero_spatial`, `libero_object`, `libero_goal`, `libero_10`, `libero_90`, `libero_130`. **Start with `libero_spatial`** (smallest, matches our Phase 0 plan).
 
-## 7. Outstanding pre-Phase-0 tasks
+## 7. Phase 0 launch — 🔄 smoke test 2 in flight
 
-1. ✅ Identified base SFT model: `Haozhan72/Openvla-oft-SFT-libero-spatial-traj1` (downloading now).
-2. 🔄 Wait for `--model openvla-oft` reinstall to complete (in progress).
-3. ⏳ Patch `libero_spatial_grpo_openvlaoft.yaml` `model_path` → `/nyx-storage1/hanliu/hf/models/Openvla-oft-SFT-libero-spatial-traj1` (both `actor` and `rollout` model_path entries).
-4. ⏳ LIBERO bddl/asset data — the `libero` pip package should include simulation assets; verify by attempting one env init.
-5. ⏳ Identify free GPUs at launch time (`ssh erebus nvidia-smi`).
-6. ⏳ Launch `bash examples/embodiment/run_embodiment.sh libero_spatial_grpo_openvlaoft LIBERO`.
+### Completed
+- ✅ Identified base SFT model: `Haozhan72/Openvla-oft-SFT-libero-spatial-traj1` — downloaded to `/nyx-storage1/hanliu/hf/models/` (15 GB).
+- ✅ `--model openvla-oft` reinstall complete (transformers refork from `moojink/transformers-openvla-oft@bc339d9`).
+- ✅ Patched `libero_spatial_grpo_openvlaoft.yaml` `model_path` (both actor + rollout entries) to point at local model dir.
+- ✅ Confirmed `rlinf`, `prismatic`, `mani_skill`, `libero` all import cleanly.
+
+### Launch attempts
+1. **smoke1** (CUDA_VISIBLE_DEVICES=3, single GPU): CUDA OOM. RLinf auto-spawned 4 Ray RolloutGroup workers, all tried to load 7B OpenVLA-OFT (~14 GB params) on the same 48 GB A40 → 56 GB demand. Failed at `model.to(cuda)` call in `huggingface_worker.py:100`.
+2. **smoke2** (CUDA_VISIBLE_DEVICES=0,3, 2 idle GPUs on erebus, `env.train.total_num_envs=4`, `env.eval.total_num_envs=4`, max_epochs=1, rollout_epoch=2, group_size=2): in flight.
+
+### Blockers handled
+- hemera/nyx require slurm-allocated job for SSH access (`pam_slurm_adopt` denies otherwise). Sticking to erebus for now.
+- erebus has only GPUs 0 and 3 idle (1,2 are 42 GB used by another user).
+- Single-GPU mode would need RLinf config patch to force `num_rollout_workers=1` — punted until needed.
+
+### Next gate
+- If smoke2 passes (full pipeline runs end-to-end without OOM, even briefly): proceed to a full LIBERO-Spatial GRPO run with default batch sizes — Phase 0 considered passed.
+- If smoke2 OOMs again: investigate per-worker GPU memory; possibly switch to FSDP across both GPUs for the single actor, or add gradient checkpointing.
 
 ## 8. What's on /nyx-storage1/hanliu/ for MIRAGE
 
