@@ -114,6 +114,9 @@ Available LIBERO suites in configs: `libero_spatial`, `libero_object`, `libero_g
 ### Phase 0 — verdict: ✅ INFRASTRUCTURE PASSED
 The full RLinf-VLA → OpenVLA-OFT → LIBERO-Spatial pipeline runs cleanly on our cluster. Model load, Ray placement, env init, rollout generation all work. The remaining work is *throughput tuning* for A40 (slower than the H100 reference), not infrastructure debug.
 
+### Phase 1.0 — verdict: ✅ PASSED (2026-05-19)
+Show-o2-1.5B loads from local weights, runs Wan-VAE + multimodal embedding + `mmu_generate` end-to-end, returns coherent caption on the demo image. The meta-parameter warnings emitted during weight load were cosmetic (output is sensible). `mirage_showo_venv` (transformers 4.47 + diffusers 0.31 + flash-attn 2.7) works alongside `mirage_venv` (transformers 4.40 + RLinf + OFT) without conflict. Print-caption smoke at `scripts/phase1_0_print_caption.{py,sh}` is the reusable inference scaffold for Phase 1.1.
+
 ### Blockers handled
 - hemera/nyx require slurm-allocated job for SSH access (`pam_slurm_adopt`). ✅ `salloc -p all -N 1 -w nyx --gres=gpu:a40:4 --time=02:00:00 --no-shell` granted job 17688 → `ssh nyx` now works directly.
 - erebus had only 2 GPUs idle (1,2 occupied by another user) — insufficient for RLinf's 4-rank default.
