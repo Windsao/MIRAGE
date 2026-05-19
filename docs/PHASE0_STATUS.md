@@ -46,25 +46,39 @@ Effectively **9 of 12 A40s available** at session start.
 | `verl` conda env | `/nyx-storage1/hanliu/miniconda3/envs/verl/` | torch 2.6 + cu124 — but **Python 3.10**, mismatched with RLinf's 3.11. Not reusable. |
 | `RLinf/` | `/home/mzh1800/RLinf/` (18 MB) | **NEW** — cloned via `git clone --depth 1`. |
 
-## 5. RLinf install — 🔄 in progress
+## 5. RLinf install — ✅ core complete, openvla-oft variant in progress
 
 ### Approach
-- uv venv at `/nyx-storage1/hanliu/envs/mirage_venv/`
+- uv venv at `/nyx-storage1/hanliu/envs/mirage_venv/` (~11 GB)
 - Python 3.11.14 (pre-fetched via `uv python install 3.11.14`)
-- All caches redirected to `/nyx-storage1/hanliu/uv_cache/`
-- Command: `bash requirements/install.sh embodied --model openvla --env maniskill_libero --venv /nyx-storage1/hanliu/envs/mirage_venv --no-root`
+- All caches redirected to `/nyx-storage1/hanliu/uv_cache/` (~14 GB)
+- Command: `bash requirements/install.sh embodied --model openvla-oft --env maniskill_libero --venv /nyx-storage1/hanliu/envs/mirage_venv --no-root`
 
 ### Issues hit & resolved
-- ❌ Initial attempt with uv 0.7.8 failed: "Python 3.11.14 no download available"
-- ✅ Upgraded uv 0.7.8 → 0.11.15 via `uv self update`
-- ✅ Pre-installed Python 3.11.14 via `uv python install`
-- 🔄 Install relaunched, venv created successfully, packages installing
+- ❌ Initial attempt with uv 0.7.8 failed: "Python 3.11.14 no download available" → ✅ upgraded uv to 0.11.15
+- ❌ `evdev==1.9.3` C-extension failed to compile with conda gcc (missing `SW_PEN_INSERTED` kernel constant) → ✅ rebuilt with `CC=/usr/bin/gcc` (system gcc 8.5 + system headers have the constant)
+- ❌ `mani_skill` import failed with `libGL.so.1: cannot open shared object file` → ✅ replaced `opencv-python` with `opencv-python-headless==4.11.0.86`
+- ❌ Used `--model openvla` first; libero_spatial config actually expects openvla-oft variant → 🔄 re-running with `--model openvla-oft`
+- ❌ vllm/sglang/megatron not in `embodied` target → ✅ not needed; libero config uses `generation_backend: "huggingface"`
 
 ### Decision
 - ❌ Abandoned plan to clone `verl` conda env (Python 3.10 ≠ RLinf's 3.11.14 requirement)
 
-### Log
-- `/home/mzh1800/MIRAGE/logs/rlinf_install.log` (tail with `ssh direct_slurm 'tail -f /home/mzh1800/MIRAGE/logs/rlinf_install.log'`)
+### Verified working imports (post install3)
+- torch 2.6.0+cu124, transformers 4.40.1, flash-attn 2.7.4.post1, ray 2.55.1
+- mani_skill 3.0.0b22, libero 0.1.0, prismatic (openvla), rlinf 0.2.0
+- opencv-python-headless 4.11.0.86 (libGL-free)
+
+### Logs
+- `/home/mzh1800/MIRAGE/logs/rlinf_install*.log` (1–4)
+
+## 6. Model weights — 🔄 downloading
+
+- **Identified**: LIBERO-Spatial GRPO baseline starts from `Haozhan72/Openvla-oft-SFT-libero-spatial-traj1` on HuggingFace (model_path matches config exactly).
+- **In progress**: downloading to `/nyx-storage1/hanliu/hf/models/Openvla-oft-SFT-libero-spatial-traj1` (~14 GB).
+- Other LIBERO suites use sibling repos under `Haozhan72/Openvla-oft-SFT-libero-{10,object,goal}-traj1`.
+- For LIBERO-90 / LIBERO-130 (different config target), use `RLinf/RLinf-OpenVLAOFT-LIBERO-90-Base-Lora` and `-130-Base-Lora`.
+- Reference fully-trained GRPO results: `RLinf/RLinf-OpenVLAOFT-GRPO-LIBERO-spatial` (already-trained, useful as eval target).
 
 ## 6. Phase 0 target config — identified
 
@@ -79,12 +93,14 @@ Key specs:
 
 Available LIBERO suites in configs: `libero_spatial`, `libero_object`, `libero_goal`, `libero_10`, `libero_90`, `libero_130`. **Start with `libero_spatial`** (smallest, matches our Phase 0 plan).
 
-## 7. Outstanding pre-Phase-0 tasks (after install completes)
+## 7. Outstanding pre-Phase-0 tasks
 
-1. Download LIBERO data — not yet on `/nyx-storage1/hanliu/`. RLinf install should fetch automatically, verify.
-2. Download OpenVLA-OFT weights — not on `/nyx-storage1/hanliu/hf/`. Will be fetched at first model load.
-3. Identify free GPUs at launch time (check `nvidia-smi` on erebus/hemera/nyx).
-4. Launch `bash examples/embodiment/run_embodiment.sh <config>` with proper env vars.
+1. ✅ Identified base SFT model: `Haozhan72/Openvla-oft-SFT-libero-spatial-traj1` (downloading now).
+2. 🔄 Wait for `--model openvla-oft` reinstall to complete (in progress).
+3. ⏳ Patch `libero_spatial_grpo_openvlaoft.yaml` `model_path` → `/nyx-storage1/hanliu/hf/models/Openvla-oft-SFT-libero-spatial-traj1` (both `actor` and `rollout` model_path entries).
+4. ⏳ LIBERO bddl/asset data — the `libero` pip package should include simulation assets; verify by attempting one env init.
+5. ⏳ Identify free GPUs at launch time (`ssh erebus nvidia-smi`).
+6. ⏳ Launch `bash examples/embodiment/run_embodiment.sh libero_spatial_grpo_openvlaoft LIBERO`.
 
 ## 8. What's on /nyx-storage1/hanliu/ for MIRAGE
 
