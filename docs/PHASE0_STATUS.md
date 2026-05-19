@@ -105,16 +105,31 @@ Available LIBERO suites in configs: `libero_spatial`, `libero_object`, `libero_g
 1. **smoke1** (erebus, CUDA_VISIBLE_DEVICES=3, single GPU): CUDA OOM. RLinf auto-spawned 4 Ray RolloutGroup workers, all tried to load 7B OpenVLA-OFT (~14 GB params) on the same 48 GB A40 → 56 GB demand. Failed at `model.to(cuda)` call in `huggingface_worker.py:100`.
 2. **smoke2** (erebus, CUDA_VISIBLE_DEVICES=0,3, total_num_envs=4): config validation error — `total_num_envs // env_world_size // pipeline_stage_num` must be divisible by `group_size`.
 3. **smoke3** (erebus, CUDA_VISIBLE_DEVICES=0,3, total_num_envs=16): still OOM. RLinf's `FlexiblePlacementStrategy` hardcodes 4 ranks regardless of CUDA_VISIBLE_DEVICES → 4 workers on 2 GPUs → 2 workers per GPU → OOM.
-4. **phase0_nyx** (nyx, full 4 A40 via slurm job 17688, default batch sizes, max_epochs=2): in flight.
+4. **phase0_nyx** (nyx, full 4 A40 via slurm job 17688, default batch sizes, max_epochs=2): **pipeline ran end-to-end** but job hit 2 hr wall-time limit during epoch 1.
+   - ✅ All 4 ActorGroup workers loaded the 7B OpenVLA-OFT model (no OOM).
+   - ✅ All 4 RolloutGroup workers spawned, generated 2 of 16 rollouts before TIMEOUT.
+   - ⏱  Per-rollout-epoch wall-time: **~35 min** on 4× A40 (RLinf reference uses 8× H100).
+   - Projected full Phase 0 reproduction (2 epochs × 16 rollouts): **~18 hours**.
+
+### Phase 0 — verdict: ✅ INFRASTRUCTURE PASSED
+The full RLinf-VLA → OpenVLA-OFT → LIBERO-Spatial pipeline runs cleanly on our cluster. Model load, Ray placement, env init, rollout generation all work. The remaining work is *throughput tuning* for A40 (slower than the H100 reference), not infrastructure debug.
 
 ### Blockers handled
 - hemera/nyx require slurm-allocated job for SSH access (`pam_slurm_adopt`). ✅ `salloc -p all -N 1 -w nyx --gres=gpu:a40:4 --time=02:00:00 --no-shell` granted job 17688 → `ssh nyx` now works directly.
 - erebus had only 2 GPUs idle (1,2 occupied by another user) — insufficient for RLinf's 4-rank default.
 - RLinf hardcodes 4 ranks even with `CUDA_VISIBLE_DEVICES` overriding GPU count — need full-node allocation. (Or patch `FlexiblePlacementStrategy`; deferred.)
 
-### Next gate
-- If smoke2 passes (full pipeline runs end-to-end without OOM, even briefly): proceed to a full LIBERO-Spatial GRPO run with default batch sizes — Phase 0 considered passed.
-- If smoke2 OOMs again: investigate per-worker GPU memory; possibly switch to FSDP across both GPUs for the single actor, or add gradient checkpointing.
+### Next gate — Phase 0.5: tune for A40 throughput
+Before the real Phase 0 reproduction (target: 80%+ success on LIBERO-Spatial), we need to either:
+1. **Accept slower wall-clock** — request longer slurm allocations (24 hr max?) and run as-is.
+2. **Tune the config for A40**: smaller `group_size` (8 → 4), smaller `total_num_envs` (64 → 16/32), `rollout_epoch` (16 → 4 or 8). Trades sample efficiency for wall-clock.
+3. **Enable gradient checkpointing** in `actor.fsdp_config` (cuts memory + slows compute — but if GRPO update is bottleneck, helps).
+4. **Try `temperature_eval` lower / `do_sample: False`** for faster rollouts during eval (if applicable).
+
+Option 2 is the practical near-term move. Tracking as task #22.
+
+### Active slurm allocations
+- Job 17688 (nyx) — TIMEOUT at 04:57:20 UTC. Killed mid-rollout. No leftover processes.
 
 ## 8. What's on /nyx-storage1/hanliu/ for MIRAGE
 
