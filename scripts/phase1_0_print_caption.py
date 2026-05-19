@@ -25,14 +25,10 @@ from PIL import Image
 SHOWO2_PATH = Path("/home/mzh1800/Show-o-repo/show-o2")
 sys.path.insert(0, str(SHOWO2_PATH))
 
-from models import Showo2Qwen2_5, WanVAE                                          # noqa: E402
-from utils import (                                                              # noqa: E402
-    get_text_tokenizer,
-    get_hyper_params,
-    image_transform,
-    path_to_llm_name,
-    omni_attn_mask_naive,
-)
+from models import Showo2Qwen2_5, WanVAE, omni_attn_mask_naive                   # noqa: E402
+from models.misc import get_text_tokenizer                                       # noqa: E402
+from utils import get_hyper_params, path_to_llm_name                             # noqa: E402
+from datasets.utils import image_transform                                       # noqa: E402
 
 
 CONFIG_PATH = Path("/home/mzh1800/MIRAGE/configs/showo2_smoke.yaml")
