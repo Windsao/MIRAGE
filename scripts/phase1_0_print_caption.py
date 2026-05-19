@@ -26,7 +26,6 @@ SHOWO2_PATH = Path("/home/mzh1800/Show-o-repo/show-o2")
 sys.path.insert(0, str(SHOWO2_PATH))
 
 from models import Showo2Qwen2_5, WanVAE                                          # noqa: E402
-from models.misc import load_state_dict                                          # noqa: E402
 from utils import (                                                              # noqa: E402
     get_text_tokenizer,
     get_hyper_params,
