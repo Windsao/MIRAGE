@@ -4,10 +4,6 @@
 
 > Training small unified multimodal models for embodied manipulation via imagination-verified, self-consistent reinforcement learning.
 
-**Status:** scaffolding (Week 0). Code is empty; see `docs/PLAN.md` for the full design and execution roadmap.
-
-**Target venue:** ICLR 2027 (submission Sep–Oct 2026).
-
 ---
 
 ## One-paragraph pitch
@@ -24,46 +20,22 @@ Vision-Language-Action (VLA) models map perception to action directly with no re
 | Backbone (primary) | [Show-o-1.5B](https://github.com/showlab/Show-o) — discrete-token unified MLLM, LLaMA-3.2-1B base |
 | Backbone (scaling ablation) | [InternVL-U-4B](https://github.com/OpenGVLab/InternVL-U) |
 | Sim environments | LIBERO (primary), MetaWorld (diversity), CALVIN (long-horizon) |
-| Compute | Northwestern CS cluster, A40 nodes (`erebus`/`hemera`/`nyx`) |
 
 ---
 
-## Repo layout (planned)
+## Repo layout
 
 ```
 MIRAGE/
-├── README.md              # this file
-├── docs/
-│   ├── PLAN.md            # design doc + chapter plan + INSIGHT log
-│   └── PHASES.md          # week-by-week execution milestones
-├── configs/               # YAML configs for SFT + GRPO runs
+├── README.md
+├── configs/               # YAML configs (Show-o2 smoke)
 ├── mirage/                # main package
-│   ├── policy/            # unified-model → RLinf policy wrapper
-│   ├── rewards/           # IV (imagination-verified) + SC (self-consistency) terms
-│   ├── rollout/           # multi-turn rollout loop, env wrappers
-│   ├── train/             # SFT warm-start, GRPO training
-│   └── eval/              # success-rate + interpretability metrics
-├── scripts/               # slurm/SSH launchers, one per phase
-├── tests/                 # unit tests
-└── pyproject.toml         # package metadata
+│   └── policy/            # action tokenizer; unified-model policy wrappers
+└── scripts/               # phase-by-phase launchers
 ```
-
-Modules will be filled in as each phase completes — see `docs/PHASES.md`.
-
----
-
-## Quick links
-
-- **Plan + INSIGHT log:** [`docs/PLAN.md`](docs/PLAN.md)
-- **Phase roadmap:** [`docs/PHASES.md`](docs/PHASES.md)
-- **Closest prior work:**
-  - [Emu3.5: Native Multimodal Models are World Learners](https://arxiv.org/abs/2510.26583) — closed 34B unified+RL, ate the headline niche
-  - [LaST-R1: Reinforcing Robotic Manipulation via Adaptive Physical Latent Reasoning](https://arxiv.org/abs/2604.28192) — text-CoT RL baseline
-  - [Embodied-R1: Reinforced Embodied Reasoning](https://arxiv.org/abs/2508.13998) — RFT curriculum template
-  - [RLinf-VLA: Unified Framework for VLA+RL](https://arxiv.org/abs/2510.06710) — execution platform
 
 ---
 
 ## License
 
-To be decided before first non-scaffold release. Likely Apache-2.0 (matches BAGEL / Show-o / RLinf-VLA).
+To be decided before release. Likely Apache-2.0 (matches Show-o / RLinf-VLA).
