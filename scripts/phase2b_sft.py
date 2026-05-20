@@ -163,8 +163,8 @@ def build_one_input(model, vae, text_tokenizer, showo_token_ids, config,
         [showo_token_ids["boi_id"], showo_token_ids["eoi_id"]] + q_ids + role_b,
         device=device,
     )[None, :]
-    text_embeds_a = model.showo.model.embed_tokens(text_tokens_a)
-    text_embeds_b = model.showo.model.embed_tokens(text_tokens_b)
+    text_embeds_a = model.showo.get_input_embeddings()(text_tokens_a)
+    text_embeds_b = model.showo.get_input_embeddings()(text_tokens_b)
 
     _, num_mmu_image_tokens, *_ = get_hyper_params(config, text_tokenizer, showo_token_ids)
     if config.model.showo.add_time_embeds:
@@ -189,7 +189,7 @@ def build_one_input(model, vae, text_tokenizer, showo_token_ids, config,
 
     L_prefix = prefix_embeds.shape[1]
     A = int(action_token_ids.shape[0])
-    action_embeds = model.showo.model.embed_tokens(
+    action_embeds = model.showo.get_input_embeddings()(
         action_token_ids[None, :]
     ).to(weight_dtype)                                              # [1, A, H]
     input_embeds = torch.cat([prefix_embeds, action_embeds], dim=1)

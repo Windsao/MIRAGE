@@ -120,8 +120,8 @@ def build_prefix_embeds(model, vae, text_tokenizer, showo_token_ids, config,
         [showo_token_ids["boi_id"], showo_token_ids["eoi_id"]] + q_ids + role_b,
         device=device,
     )[None, :]
-    text_embeds_a = model.showo.model.embed_tokens(text_tokens_a)
-    text_embeds_b = model.showo.model.embed_tokens(text_tokens_b)
+    text_embeds_a = model.showo.get_input_embeddings()(text_tokens_a)
+    text_embeds_b = model.showo.get_input_embeddings()(text_tokens_b)
 
     _, num_mmu_image_tokens, *_ = get_hyper_params(config, text_tokenizer, showo_token_ids)
     if config.model.showo.add_time_embeds:
@@ -187,7 +187,7 @@ def sample_action_chunks(model, prefix_embeds, modality_positions, action_tokeni
             next_id = int(torch.multinomial(probs, num_samples=1).item())
         sampled.append(next_id)
 
-        next_emb = model.showo.model.embed_tokens(
+        next_emb = model.showo.get_input_embeddings()(
             torch.tensor([[next_id]], device=device)
         ).to(weight_dtype)
         cur_embeds = torch.cat([cur_embeds, next_emb], dim=1)
@@ -211,7 +211,7 @@ def teacher_force_logprobs(model, prefix_embeds, modality_positions,
     lo, hi = action_tokenizer.action_token_id_range
     L_prefix = prefix_embeds.shape[1]
     A = int(target_token_ids.shape[0])
-    target_embeds = model.showo.model.embed_tokens(
+    target_embeds = model.showo.get_input_embeddings()(
         target_token_ids[None, :]
     ).to(weight_dtype)
     input_embeds = torch.cat([prefix_embeds, target_embeds], dim=1)

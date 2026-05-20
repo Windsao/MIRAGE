@@ -101,8 +101,8 @@ def main() -> None:
         [showo_token_ids["boi_id"], showo_token_ids["eoi_id"]] + q_ids + role_b,
         device=device,
     )[None, :]
-    text_embeds_a = model.showo.model.embed_tokens(text_tokens_a)
-    text_embeds_b = model.showo.model.embed_tokens(text_tokens_b)
+    text_embeds_a = model.showo.get_input_embeddings()(text_tokens_a)
+    text_embeds_b = model.showo.get_input_embeddings()(text_tokens_b)
 
     if config.model.showo.add_time_embeds:
         time_embeds = model.time_embed(torch.tensor([[1.0]], device=device), text_embeds_a.dtype)

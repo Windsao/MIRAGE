@@ -84,8 +84,8 @@ def build_input_embeds(model, vae, text_tokenizer, showo_token_ids, config, devi
         [showo_token_ids["boi_id"], showo_token_ids["eoi_id"]] + q_ids + role_b,
         device=device,
     )[None, :]
-    text_embeds_a = model.showo.model.embed_tokens(text_tokens_a)
-    text_embeds_b = model.showo.model.embed_tokens(text_tokens_b)
+    text_embeds_a = model.showo.get_input_embeddings()(text_tokens_a)
+    text_embeds_b = model.showo.get_input_embeddings()(text_tokens_b)
 
     if config.model.showo.add_time_embeds:
         time_embeds = model.time_embed(torch.tensor([[1.0]], device=device), text_embeds_a.dtype)
@@ -166,7 +166,7 @@ def main() -> None:
     action_token_ids = torch.from_numpy(
         action_tokenizer.encode(synthetic_actions)
     ).to(device)                                            # [N, 56]
-    action_embeds = model.showo.model.embed_tokens(action_token_ids).to(weight_dtype)
+    action_embeds = model.showo.get_input_embeddings()(action_token_ids).to(weight_dtype)
 
     # Tile prefix across the group, then concat action embeds at the tail.
     prefix_batched = prefix_embeds.expand(GROUP_SIZE, -1, -1).contiguous()
