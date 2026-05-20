@@ -59,14 +59,16 @@ ACTION_DIM = 7
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser()
     ap.add_argument("--num-tasks", type=int, default=10)
-    ap.add_argument("--max-steps-per-demo", type=int, default=32,
-                    help="cap each demo at this many timesteps (smoke default)")
+    ap.add_argument("--max-steps-per-demo", type=int, default=None,
+                    help="cap each demo at this many timesteps (None = use all)")
+    ap.add_argument("--num-chunks", type=int, default=8,
+                    help="action chunk size (predict K consecutive 7-D actions per inference)")
     ap.add_argument("--steps", type=int, default=200)
     ap.add_argument("--batch-size", type=int, default=1)
     ap.add_argument("--lr", type=float, default=1e-5)
     ap.add_argument("--save-dir", type=str,
                     default="/nyx-storage1/hanliu/mirage_ckpts/phase2b_sft")
-    ap.add_argument("--save-every", type=int, default=200)
+    ap.add_argument("--save-every", type=int, default=999999)
     return ap.parse_args()
 
 
@@ -99,12 +101,13 @@ def build_components(device, weight_dtype):
 
 def build_one_input(model, vae, text_tokenizer, showo_token_ids, config,
                     device, weight_dtype, image_np, task_text, action_token_ids):
-    """Return (input_embeds, attn, label_start_idx) for one example.
+    """Return (input_embeds, attn, L_prefix) for one example.
 
-    input_embeds = [prompt_tokens..., 7 action token embeddings]
+    input_embeds = [prompt_tokens..., A action token embeddings]
+                   where A = len(action_token_ids) = ACTION_DIM * num_chunks
     attn        = additive omni mask on prefix, causal on actions
-    label_start = position L_prefix; logits at [L_prefix-1 .. L_prefix-1+7) supervise the
-                  7 action tokens.
+    L_prefix    = start of the action block; logits at
+                  [L_prefix-1 .. L_prefix-1+A) supervise the A action tokens.
     """
     # ---- image -> embeds (no grad on VAE; model.image_embedder_* IS trained)
     img_pil = Image.fromarray(image_np).convert("RGB")
@@ -160,6 +163,7 @@ def build_one_input(model, vae, text_tokenizer, showo_token_ids, config,
         )[None, None, :]
 
     L_prefix = prefix_embeds.shape[1]
+    A = int(action_token_ids.shape[0])
     action_embeds = model.showo.model.embed_tokens(
         action_token_ids[None, :]
     ).to(weight_dtype)                                              # [1, A, H]
@@ -174,7 +178,7 @@ def build_one_input(model, vae, text_tokenizer, showo_token_ids, config,
     attn = torch.zeros(1, 1, L_total, L_total, device=device, dtype=torch.long)
     attn[:, :, :L_prefix, :L_prefix] = prefix_attn
     causal = torch.triu(
-        torch.full((ACTION_DIM, ACTION_DIM), neg, device=device, dtype=torch.long),
+        torch.full((A, A), neg, device=device, dtype=torch.long),
         diagonal=1,
     )
     attn[:, :, L_prefix:, L_prefix:] = causal
@@ -188,12 +192,19 @@ def main() -> None:
     weight_dtype = torch.bfloat16
 
     # ---- dataset
-    print(f"[2b] loading LIBERO-Spatial dataset (cap {args.max_steps_per_demo} steps/demo)", flush=True)
+    print(
+        f"[2b] loading LIBERO-Spatial dataset (cap={args.max_steps_per_demo} "
+        f"steps/demo, num_chunks={args.num_chunks})",
+        flush=True,
+    )
     ds = libero_spatial_dataset(
         dataset_dir=DATASET_DIR,
         max_steps_per_demo=args.max_steps_per_demo,
+        num_chunks=args.num_chunks,
     )
-    print(f"[2b] dataset size = {len(ds)} (image, action, task) triples", flush=True)
+    print(f"[2b] dataset size = {len(ds)} (image, action_chunk, task) triples", flush=True)
+    total_action_tokens = ACTION_DIM * args.num_chunks
+    print(f"[2b] action tokens per example = {total_action_tokens}", flush=True)
 
     # Plain DataLoader; batch_size=1 since each example owns its tensors.
     loader = DataLoader(ds, batch_size=1, shuffle=True, num_workers=0)
@@ -226,11 +237,14 @@ def main() -> None:
             batch = next(iter_loader)
 
         image_np = batch["image"][0].numpy()
-        action_np = batch["action"][0].numpy()
+        action_np = batch["action"][0].numpy()                          # [C, 7] or [7]
         task_text = batch["task"][0]
+        # Flatten time-major: dims of chunk 0, then chunk 1, ... -> [C*7]
+        flat = action_np.reshape(-1) if action_np.ndim > 1 else action_np
         action_token_ids = torch.from_numpy(
-            action_tokenizer.encode(action_np)
-        ).to(device).long()                                            # [7]
+            action_tokenizer.encode(flat)
+        ).to(device).long()                                            # [C*7]
+        A = int(action_token_ids.shape[0])
 
         input_embeds, attn, L_prefix = build_one_input(
             model, vae, text_tokenizer, showo_token_ids, config,
@@ -238,9 +252,9 @@ def main() -> None:
         )
         out = model.showo(inputs_embeds=input_embeds, attention_mask=attn)
         logits = out.logits                                            # [1, L_total, V]
-        # logits at positions [L_prefix-1 .. L_prefix-1+ACTION_DIM) supervise the
-        # 7 action token labels (next-token prediction).
-        pred_logits = logits[:, L_prefix - 1:L_prefix - 1 + ACTION_DIM, :].float()
+        # logits at positions [L_prefix-1 .. L_prefix-1+A) supervise the
+        # A action token labels (next-token prediction).
+        pred_logits = logits[:, L_prefix - 1:L_prefix - 1 + A, :].float()
         loss = F.cross_entropy(
             pred_logits.reshape(-1, pred_logits.size(-1)),
             action_token_ids,

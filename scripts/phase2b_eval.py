@@ -63,6 +63,8 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--num-tasks", type=int, default=10)
     ap.add_argument("--trials-per-task", type=int, default=3)
     ap.add_argument("--max-steps", type=int, default=200)
+    ap.add_argument("--num-chunks", type=int, default=8,
+                    help="actions per inference (matches SFT --num-chunks)")
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--output", type=str,
                     default="/home/mzh1800/MIRAGE/logs/phase2b_eval.json")
@@ -127,17 +129,28 @@ def build_prefix_embeds(model, vae, text_tokenizer, showo_token_ids, config,
 
 
 @torch.no_grad()
-def sample_action(model, prefix_embeds, modality_positions, action_tokenizer,
-                  device, weight_dtype, temperature: float = 1.0):
+def sample_action_chunks(model, prefix_embeds, modality_positions, action_tokenizer,
+                          device, weight_dtype, num_chunks: int,
+                          temperature: float = 1.0):
+    """Autoregressively sample `num_chunks * ACTION_DIM` action tokens.
+
+    Returns
+    -------
+    chunks : np.ndarray  shape [num_chunks, ACTION_DIM]
+        Decoded continuous actions (NaN where the model emitted a non-action token).
+    tokens : np.ndarray  shape [num_chunks * ACTION_DIM]
+        Raw sampled token ids.
+    """
     lo, hi = action_tokenizer.action_token_id_range
     cur_embeds = prefix_embeds
     L_prefix = prefix_embeds.shape[1]
+    total = num_chunks * ACTION_DIM
     prefix_attn = omni_attn_mask_naive(
         B=1, LEN=L_prefix, modalities=modality_positions, device=device, inverted=True,
     )
     sampled: list[int] = []
 
-    for _ in range(ACTION_DIM):
+    for _ in range(total):
         L_total = cur_embeds.shape[1]
         neg = torch.iinfo(torch.long).min
         attn = torch.zeros(1, 1, L_total, L_total, device=device, dtype=torch.long)
@@ -168,29 +181,47 @@ def sample_action(model, prefix_embeds, modality_positions, action_tokenizer,
         cur_embeds = torch.cat([cur_embeds, next_emb], dim=1)
 
     tokens = np.asarray(sampled, dtype=np.int64)
-    return action_tokenizer.decode(tokens).astype(np.float32), tokens
+    decoded = action_tokenizer.decode(tokens).astype(np.float32)        # [total]
+    chunks = decoded.reshape(num_chunks, ACTION_DIM)
+    return chunks, tokens
 
 
 def run_trial(env, model, vae, text_tokenizer, showo_token_ids, config,
-              device, weight_dtype, action_tokenizer, task_text, max_steps, temperature):
+              device, weight_dtype, action_tokenizer, task_text, max_steps,
+              num_chunks, temperature):
     obs = env.reset()
     success = False
-    for t in range(max_steps):
+    total_steps = 0
+    while total_steps < max_steps:
         prefix_embeds, modality_positions = build_prefix_embeds(
             model, vae, text_tokenizer, showo_token_ids, config,
             device, weight_dtype, obs["agentview_image"], task_text,
         )
-        action, _ = sample_action(
+        chunks, _ = sample_action_chunks(
             model, prefix_embeds, modality_positions, action_tokenizer,
-            device, weight_dtype, temperature=temperature,
+            device, weight_dtype, num_chunks, temperature=temperature,
         )
-        obs, reward, done, info = env.step(action)
+        # Replay decoded chunks back-to-back as an open-loop horizon.
+        done = False
+        info = {}
+        reward = 0.0
+        for k in range(num_chunks):
+            if total_steps >= max_steps:
+                break
+            # Skip NaNs from out-of-range tokens (shouldn't happen with constrained sampling).
+            act = chunks[k]
+            if not np.all(np.isfinite(act)):
+                act = np.nan_to_num(act, nan=0.0)
+            obs, reward, done, info = env.step(act.astype(np.float32))
+            total_steps += 1
+            if done:
+                break
         if done:
             success = bool(info.get("success", reward > 0))
             if not success and reward > 0:
                 success = True
             break
-    return success, t + 1
+    return success, total_steps
 
 
 def main() -> None:
@@ -245,7 +276,7 @@ def main() -> None:
             success, steps = run_trial(
                 env, model, vae, text_tokenizer, showo_token_ids, config,
                 device, weight_dtype, action_tokenizer,
-                t.language, args.max_steps, args.temperature,
+                t.language, args.max_steps, args.num_chunks, args.temperature,
             )
             succ_list.append(int(success))
             len_list.append(steps)

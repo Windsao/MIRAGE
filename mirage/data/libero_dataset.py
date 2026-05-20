@@ -39,6 +39,7 @@ class LiberoActionDataset(Dataset):
         task_descriptions: Iterable[str],
         max_steps_per_demo: int | None = None,
         image_key: str = "agentview_rgb",
+        num_chunks: int = 1,
     ) -> None:
         super().__init__()
         self.hdf5_paths = [str(p) for p in hdf5_paths]
@@ -50,8 +51,12 @@ class LiberoActionDataset(Dataset):
             )
         self.image_key = image_key
         self.max_steps_per_demo = max_steps_per_demo
+        if num_chunks < 1:
+            raise ValueError(f"num_chunks must be >= 1, got {num_chunks}")
+        self.num_chunks = num_chunks
 
-        # Build a flat index of (file_idx, demo_key, t).
+        # Build a flat index of (file_idx, demo_key, t). Only include t such
+        # that t + num_chunks <= T (so we always have a full chunk to learn).
         self.index: list[tuple[int, str, int]] = []
         for fi, path in enumerate(self.hdf5_paths):
             with h5py.File(path, "r") as f:
@@ -59,7 +64,8 @@ class LiberoActionDataset(Dataset):
                     T = int(f["data"][demo_key]["actions"].shape[0])
                     if self.max_steps_per_demo is not None:
                         T = min(T, self.max_steps_per_demo)
-                    self.index.extend((fi, demo_key, t) for t in range(T))
+                    last_t = T - self.num_chunks + 1
+                    self.index.extend((fi, demo_key, t) for t in range(max(last_t, 0)))
         if not self.index:
             raise RuntimeError(f"no demos found across {self.hdf5_paths}")
         self._file_cache: dict[int, h5py.File] = {}
@@ -74,8 +80,11 @@ class LiberoActionDataset(Dataset):
         f = self._open(fi)
         demo = f["data"][demo_key]
         # robosuite renders agentview upside down; flip vertically.
-        img = np.flipud(demo["obs"][self.image_key][t]).copy()           # [H, W, 3] uint8
-        action = demo["actions"][t].astype(np.float32)                   # [7]
+        img = np.flipud(demo["obs"][self.image_key][t]).copy()                          # [H, W, 3] uint8
+        # action chunk of length self.num_chunks (==1 returns the single-step shape)
+        action = demo["actions"][t:t + self.num_chunks].astype(np.float32)              # [C, 7]
+        if self.num_chunks == 1:
+            action = action[0]                                                          # [7]
         return {
             "image": img,
             "action": action,
@@ -106,6 +115,7 @@ class LiberoActionDataset(Dataset):
 def libero_spatial_dataset(
     dataset_dir: str | os.PathLike,
     max_steps_per_demo: int | None = None,
+    num_chunks: int = 1,
 ) -> LiberoActionDataset:
     """Build a dataset from the standard libero_spatial demo dir.
 
@@ -133,4 +143,5 @@ def libero_spatial_dataset(
         hdf5_paths=paths,
         task_descriptions=tasks,
         max_steps_per_demo=max_steps_per_demo,
+        num_chunks=num_chunks,
     )
