@@ -1,0 +1,286 @@
+"""Phase 2B SFT: teach Show-o2 the action-token language on LIBERO demos.
+
+Minimal teacher-forcing SFT loop:
+  obs image -> Show-o2 multimodal embed pipeline
+            -> concatenate the 7 *target* action-token embeddings at the tail
+            -> single forward through model.showo
+            -> cross-entropy on logits at the 7 action positions
+            -> AdamW step
+
+We deliberately *do not* use LoRA in this smoke — Show-o2-1.5B + AdamW fits in
+~30 GB on an A40, and the full-model gradient lets us debug whether the LM
+head can pick up the action token distribution at all.
+
+Configurable via CLI:
+  --num-tasks   how many LIBERO-Spatial tasks to draw from (default 10)
+  --steps       number of training steps (default 200; ~30-45 min on 1 A40)
+  --batch-size  examples per step (default 1; A40 mem-tight beyond 2)
+  --lr          learning rate (default 1e-5)
+  --save-dir    output checkpoint directory
+
+Outputs:
+  <save-dir>/sft_step_<step>.pt        # actor state_dict snapshots
+  <save-dir>/loss_curve.csv            # one line per step: step, loss
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import os
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+from omegaconf import OmegaConf
+from PIL import Image
+from torch.utils.data import DataLoader
+
+SHOWO2_PATH = Path("/home/mzh1800/Show-o-repo/show-o2")
+sys.path.insert(0, str(SHOWO2_PATH))
+sys.path.insert(0, str(Path("/home/mzh1800/MIRAGE")))
+
+from models import Showo2Qwen2_5, WanVAE, omni_attn_mask_naive                   # noqa: E402
+from models.misc import get_text_tokenizer                                       # noqa: E402
+from utils import get_hyper_params, path_to_llm_name                             # noqa: E402
+from datasets.utils import image_transform                                       # noqa: E402
+
+from mirage.policy import ActionTokenizer                                        # noqa: E402
+from mirage.data import libero_spatial_dataset                                   # noqa: E402
+
+CONFIG_PATH = Path("/home/mzh1800/MIRAGE/configs/showo2_smoke.yaml")
+DATASET_DIR = Path("/nyx-storage1/hanliu/envs/mirage_venv/libero/libero/datasets")
+ACTION_DIM = 7
+
+
+def parse_args() -> argparse.Namespace:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--num-tasks", type=int, default=10)
+    ap.add_argument("--max-steps-per-demo", type=int, default=32,
+                    help="cap each demo at this many timesteps (smoke default)")
+    ap.add_argument("--steps", type=int, default=200)
+    ap.add_argument("--batch-size", type=int, default=1)
+    ap.add_argument("--lr", type=float, default=1e-5)
+    ap.add_argument("--save-dir", type=str,
+                    default="/nyx-storage1/hanliu/mirage_ckpts/phase2b_sft")
+    ap.add_argument("--save-every", type=int, default=200)
+    return ap.parse_args()
+
+
+def build_components(device, weight_dtype):
+    config = OmegaConf.load(CONFIG_PATH)
+    text_tokenizer, showo_token_ids = get_text_tokenizer(
+        config.model.showo.llm_model_path,
+        add_showo_tokens=True,
+        return_showo_token_ids=True,
+        llm_name=path_to_llm_name[config.model.showo.llm_model_path],
+    )
+    config.model.showo.llm_vocab_size = len(text_tokenizer)
+    vocab_size = len(text_tokenizer)
+
+    print("[2b] loading Wan-VAE", flush=True)
+    vae = WanVAE(
+        vae_pth=config.model.vae_model.pretrained_model_path,
+        dtype=weight_dtype,
+        device=device,
+    )
+    print("[2b] loading Show-o2-1.5B", flush=True)
+    model = Showo2Qwen2_5.from_pretrained(
+        config.model.showo.pretrained_model_path,
+        use_safetensors=False,
+    ).to(device).to(weight_dtype)
+    model.train()
+    action_tokenizer = ActionTokenizer(vocab_size=vocab_size, bins=256)
+    return config, text_tokenizer, showo_token_ids, vae, model, action_tokenizer
+
+
+def build_one_input(model, vae, text_tokenizer, showo_token_ids, config,
+                    device, weight_dtype, image_np, task_text, action_token_ids):
+    """Return (input_embeds, attn, label_start_idx) for one example.
+
+    input_embeds = [prompt_tokens..., 7 action token embeddings]
+    attn        = additive omni mask on prefix, causal on actions
+    label_start = position L_prefix; logits at [L_prefix-1 .. L_prefix-1+7) supervise the
+                  7 action tokens.
+    """
+    # ---- image -> embeds (no grad on VAE; model.image_embedder_* IS trained)
+    img_pil = Image.fromarray(image_np).convert("RGB")
+    img = image_transform(img_pil, resolution=config.dataset.preprocessing.resolution).to(device).unsqueeze(0)
+    with torch.no_grad():
+        image_latents = vae.sample(img.unsqueeze(2)).squeeze(2).to(weight_dtype)
+    image_embeds_und = model.image_embedder_und(image_latents)
+    image_embeds_gen = model.image_embedder_gen(image_latents)
+    image_embeds_und = image_embeds_und + model.position_embedding(model.image_position_ids)
+    image_embeds_und = model.und_trans(image_embeds_und)["last_hidden_state"]
+    image_embeds = model.fusion_proj(torch.cat([image_embeds_und, image_embeds_gen], dim=-1))
+
+    sys_prompt_ids = text_tokenizer(
+        "system\nYou are a helpful assistant.<|im_end|>",
+        add_special_tokens=False,
+    )["input_ids"]
+    role_a = text_tokenizer("\n<|im_start|>user\n", add_special_tokens=False)["input_ids"]
+    role_b = text_tokenizer("\n<|im_start|>assistant\n", add_special_tokens=False)["input_ids"]
+    q_ids = text_tokenizer(
+        f"What action should the robot take to {task_text.lower()}?",
+        add_special_tokens=False,
+    ).input_ids
+
+    text_tokens_a = torch.tensor(
+        [showo_token_ids["bos_id"]] + sys_prompt_ids + role_a, device=device
+    )[None, :]
+    text_tokens_b = torch.tensor(
+        [showo_token_ids["boi_id"], showo_token_ids["eoi_id"]] + q_ids + role_b,
+        device=device,
+    )[None, :]
+    text_embeds_a = model.showo.model.embed_tokens(text_tokens_a)
+    text_embeds_b = model.showo.model.embed_tokens(text_tokens_b)
+
+    _, num_mmu_image_tokens, *_ = get_hyper_params(config, text_tokenizer, showo_token_ids)
+    if config.model.showo.add_time_embeds:
+        time_embeds = model.time_embed(torch.tensor([[1.0]], device=device), text_embeds_a.dtype)
+        if hasattr(model, "time_embed_proj"):
+            time_embeds = model.time_embed_proj(time_embeds)
+        prefix_embeds = torch.cat(
+            [text_embeds_a, text_embeds_b[:, :1], time_embeds, image_embeds, text_embeds_b[:, 1:]],
+            dim=1,
+        ).to(weight_dtype)
+        modality_positions = torch.tensor(
+            [text_tokens_a.shape[1] + 2, num_mmu_image_tokens], device=device,
+        )[None, None, :]
+    else:
+        prefix_embeds = torch.cat(
+            [text_embeds_a, text_embeds_b[:, :1], image_embeds, text_embeds_b[:, 1:]],
+            dim=1,
+        ).to(weight_dtype)
+        modality_positions = torch.tensor(
+            [text_tokens_a.shape[1] + 1, num_mmu_image_tokens], device=device,
+        )[None, None, :]
+
+    L_prefix = prefix_embeds.shape[1]
+    action_embeds = model.showo.model.embed_tokens(
+        action_token_ids[None, :]
+    ).to(weight_dtype)                                              # [1, A, H]
+    input_embeds = torch.cat([prefix_embeds, action_embeds], dim=1)
+    L_total = input_embeds.shape[1]
+
+    # Build 4D additive attention mask.
+    prefix_attn = omni_attn_mask_naive(
+        B=1, LEN=L_prefix, modalities=modality_positions, device=device, inverted=True,
+    )
+    neg = torch.iinfo(torch.long).min
+    attn = torch.zeros(1, 1, L_total, L_total, device=device, dtype=torch.long)
+    attn[:, :, :L_prefix, :L_prefix] = prefix_attn
+    causal = torch.triu(
+        torch.full((ACTION_DIM, ACTION_DIM), neg, device=device, dtype=torch.long),
+        diagonal=1,
+    )
+    attn[:, :, L_prefix:, L_prefix:] = causal
+    attn = attn.to(weight_dtype)
+    return input_embeds, attn, L_prefix
+
+
+def main() -> None:
+    args = parse_args()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    weight_dtype = torch.bfloat16
+
+    # ---- dataset
+    print(f"[2b] loading LIBERO-Spatial dataset (cap {args.max_steps_per_demo} steps/demo)", flush=True)
+    ds = libero_spatial_dataset(
+        dataset_dir=DATASET_DIR,
+        max_steps_per_demo=args.max_steps_per_demo,
+    )
+    print(f"[2b] dataset size = {len(ds)} (image, action, task) triples", flush=True)
+
+    # Plain DataLoader; batch_size=1 since each example owns its tensors.
+    loader = DataLoader(ds, batch_size=1, shuffle=True, num_workers=0)
+
+    config, text_tokenizer, showo_token_ids, vae, model, action_tokenizer = (
+        build_components(device, weight_dtype)
+    )
+
+    optim = torch.optim.AdamW(
+        [p for p in model.parameters() if p.requires_grad],
+        lr=args.lr,
+        weight_decay=0.0,
+    )
+
+    save_dir = Path(args.save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    loss_csv = open(save_dir / "loss_curve.csv", "w", newline="")
+    csv_w = csv.writer(loss_csv)
+    csv_w.writerow(["step", "loss", "wall_s"])
+
+    step = 0
+    running = 0.0
+    t0 = time.time()
+    iter_loader = iter(loader)
+    while step < args.steps:
+        try:
+            batch = next(iter_loader)
+        except StopIteration:
+            iter_loader = iter(loader)
+            batch = next(iter_loader)
+
+        image_np = batch["image"][0].numpy()
+        action_np = batch["action"][0].numpy()
+        task_text = batch["task"][0]
+        action_token_ids = torch.from_numpy(
+            action_tokenizer.encode(action_np)
+        ).to(device).long()                                            # [7]
+
+        input_embeds, attn, L_prefix = build_one_input(
+            model, vae, text_tokenizer, showo_token_ids, config,
+            device, weight_dtype, image_np, task_text, action_token_ids,
+        )
+        out = model.showo(inputs_embeds=input_embeds, attention_mask=attn)
+        logits = out.logits                                            # [1, L_total, V]
+        # logits at positions [L_prefix-1 .. L_prefix-1+ACTION_DIM) supervise the
+        # 7 action token labels (next-token prediction).
+        pred_logits = logits[:, L_prefix - 1:L_prefix - 1 + ACTION_DIM, :].float()
+        loss = F.cross_entropy(
+            pred_logits.reshape(-1, pred_logits.size(-1)),
+            action_token_ids,
+        )
+
+        optim.zero_grad(set_to_none=True)
+        loss.backward()
+        gn = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optim.step()
+
+        running += float(loss.item())
+        step += 1
+        wall = time.time() - t0
+        csv_w.writerow([step, float(loss.item()), wall])
+
+        if step % 10 == 0 or step == 1:
+            avg = running / min(step, 10)
+            print(
+                f"[2b] step {step:04d}/{args.steps} "
+                f"loss={float(loss.item()):.4f} avg10={avg:.4f} "
+                f"gn={float(gn):.2f} t={wall:.0f}s",
+                flush=True,
+            )
+            running = 0.0
+
+        if step % args.save_every == 0 or step == args.steps:
+            ckpt_path = save_dir / f"sft_step_{step}.pt"
+            print(f"[2b] saving {ckpt_path}", flush=True)
+            torch.save(
+                {
+                    "step": step,
+                    "model_state": model.state_dict(),
+                    "args": vars(args),
+                },
+                ckpt_path,
+            )
+
+    loss_csv.close()
+    print(f"[2b] DONE. final loss={loss.item():.4f}, total wall={time.time() - t0:.0f}s", flush=True)
+
+
+if __name__ == "__main__":
+    main()

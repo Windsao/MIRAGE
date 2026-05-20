@@ -51,8 +51,9 @@ checkpoints/
 *.err
 
 # Data + weights (these live on /nyx-storage1/, never in repo)
-data/
-weights/
+# Match top-level only so mirage/data/ source code isn't ignored.
+/data/
+/weights/
 *.pt
 *.pth
 *.bin
