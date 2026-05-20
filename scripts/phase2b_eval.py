@@ -59,7 +59,7 @@ ACTION_DIM = 7
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", type=str, default=None,
-                    help="Path to SFT'd model state_dict. If None, use Show-o2 from config (untrained baseline).")
+                    help="Either a .pt full-state checkpoint, or a directory holding a peft adapter.")
     ap.add_argument("--num-tasks", type=int, default=10)
     ap.add_argument("--trials-per-task", type=int, default=3)
     ap.add_argument("--max-steps", type=int, default=200)
@@ -251,9 +251,20 @@ def main() -> None:
         use_safetensors=False,
     ).to(device).to(weight_dtype)
     if args.ckpt:
-        state = torch.load(args.ckpt, map_location=device)
-        model.load_state_dict(state["model_state"])
-        print(f"[2b-eval] loaded SFT state from step={state.get('step')}", flush=True)
+        ckpt_path = Path(args.ckpt)
+        if ckpt_path.is_dir() and (ckpt_path / "adapter_config.json").exists():
+            from peft import PeftModel
+            model.showo = PeftModel.from_pretrained(
+                model.showo, str(ckpt_path), is_trainable=False,
+            )
+            model = model.to(device).to(weight_dtype)
+            meta = ckpt_path / "meta.pt"
+            step = torch.load(meta)["step"] if meta.exists() else "?"
+            print(f"[2b-eval] loaded LoRA adapter from step={step}", flush=True)
+        else:
+            state = torch.load(args.ckpt, map_location=device)
+            model.load_state_dict(state["model_state"])
+            print(f"[2b-eval] loaded full state from step={state.get('step')}", flush=True)
     model.eval()
     action_tokenizer = ActionTokenizer(vocab_size=vocab_size, bins=256)
 

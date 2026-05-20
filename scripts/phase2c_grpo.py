@@ -317,8 +317,23 @@ def main() -> None:
         config.model.showo.pretrained_model_path,
         use_safetensors=False,
     ).to(device).to(weight_dtype)
-    state = torch.load(args.ckpt, map_location=device)
-    model.load_state_dict(state["model_state"])
+    ckpt_path = Path(args.ckpt)
+    if ckpt_path.is_dir() and (ckpt_path / "adapter_config.json").exists():
+        from peft import PeftModel
+        model.showo = PeftModel.from_pretrained(
+            model.showo, str(ckpt_path), is_trainable=True,
+        )
+        model = model.to(device).to(weight_dtype)
+        # Freeze non-LoRA params (they were frozen during SFT).
+        for n, p in model.named_parameters():
+            if "showo" not in n or "lora_" not in n.lower():
+                if "lora_" not in n.lower():
+                    p.requires_grad = False
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"[2c] LoRA mode: trainable={trainable/1e6:.1f}M", flush=True)
+    else:
+        state = torch.load(args.ckpt, map_location=device)
+        model.load_state_dict(state["model_state"])
     model.train()
 
     action_tokenizer = ActionTokenizer(vocab_size=vocab_size, bins=256)

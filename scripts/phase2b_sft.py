@@ -65,14 +65,17 @@ def parse_args() -> argparse.Namespace:
                     help="action chunk size (predict K consecutive 7-D actions per inference)")
     ap.add_argument("--steps", type=int, default=200)
     ap.add_argument("--batch-size", type=int, default=1)
-    ap.add_argument("--lr", type=float, default=1e-5)
+    ap.add_argument("--lr", type=float, default=1e-5,
+                    help="for LoRA prefer 1e-4; for full ft prefer 1e-5")
+    ap.add_argument("--lora-rank", type=int, default=0,
+                    help=">0 enables LoRA on Qwen2 LM only (memory-friendly); 0 = full ft")
     ap.add_argument("--save-dir", type=str,
                     default="/nyx-storage1/hanliu/mirage_ckpts/phase2b_sft")
     ap.add_argument("--save-every", type=int, default=999999)
     return ap.parse_args()
 
 
-def build_components(device, weight_dtype):
+def build_components(device, weight_dtype, lora_rank: int = 0):
     config = OmegaConf.load(CONFIG_PATH)
     text_tokenizer, showo_token_ids = get_text_tokenizer(
         config.model.showo.llm_model_path,
@@ -94,6 +97,28 @@ def build_components(device, weight_dtype):
         config.model.showo.pretrained_model_path,
         use_safetensors=False,
     ).to(device).to(weight_dtype)
+    if lora_rank > 0:
+        from peft import LoraConfig, get_peft_model
+        lora_cfg = LoraConfig(
+            r=lora_rank,
+            lora_alpha=lora_rank * 2,
+            lora_dropout=0.0,
+            bias="none",
+            task_type="CAUSAL_LM",
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                            "gate_proj", "up_proj", "down_proj"],
+        )
+        # Wrap only the Qwen2 LM. Image-side modules (image_embedder_und/gen,
+        # und_trans, fusion_proj, position_embedding) stay frozen.
+        model.showo = get_peft_model(model.showo, lora_cfg)
+        # Freeze everything else explicitly.
+        for n, p in model.named_parameters():
+            if "showo" not in n:
+                p.requires_grad = False
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in model.parameters())
+        print(f"[2b] LoRA rank={lora_rank}  trainable={trainable/1e6:.1f}M / {total/1e6:.0f}M "
+              f"({100 * trainable / total:.2f}%)", flush=True)
     model.train()
     action_tokenizer = ActionTokenizer(vocab_size=vocab_size, bins=256)
     return config, text_tokenizer, showo_token_ids, vae, model, action_tokenizer
@@ -210,7 +235,7 @@ def main() -> None:
     loader = DataLoader(ds, batch_size=1, shuffle=True, num_workers=0)
 
     config, text_tokenizer, showo_token_ids, vae, model, action_tokenizer = (
-        build_components(device, weight_dtype)
+        build_components(device, weight_dtype, lora_rank=args.lora_rank)
     )
 
     optim = torch.optim.AdamW(
@@ -281,16 +306,24 @@ def main() -> None:
             running = 0.0
 
         if step % args.save_every == 0 or step == args.steps:
-            ckpt_path = save_dir / f"sft_step_{step}.pt"
-            print(f"[2b] saving {ckpt_path}", flush=True)
-            torch.save(
-                {
-                    "step": step,
-                    "model_state": model.state_dict(),
-                    "args": vars(args),
-                },
-                ckpt_path,
-            )
+            if args.lora_rank > 0:
+                ckpt_dir = save_dir / f"sft_step_{step}_lora"
+                print(f"[2b] saving LoRA adapter to {ckpt_dir}", flush=True)
+                # peft's save_pretrained on model.showo writes adapter + config only.
+                model.showo.save_pretrained(str(ckpt_dir))
+                torch.save({"step": step, "args": vars(args)},
+                            ckpt_dir / "meta.pt")
+            else:
+                ckpt_path = save_dir / f"sft_step_{step}.pt"
+                print(f"[2b] saving full state to {ckpt_path}", flush=True)
+                torch.save(
+                    {
+                        "step": step,
+                        "model_state": model.state_dict(),
+                        "args": vars(args),
+                    },
+                    ckpt_path,
+                )
 
     loss_csv.close()
     print(f"[2b] DONE. final loss={loss.item():.4f}, total wall={time.time() - t0:.0f}s", flush=True)
