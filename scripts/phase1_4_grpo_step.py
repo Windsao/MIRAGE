@@ -157,7 +157,7 @@ def main() -> None:
     # -- Sample synthetic action tokens (GROUP_SIZE rollouts) -------------
     # In a real rollout these would come from autoregressive generation;
     # here we fabricate them so we can test the GRPO math in one batch.
-    action_tokenizer = ActionTokenizer(vocab_size=vocab_size, bins=256)
+    action_tokenizer = ActionTokenizer(vocab_size=vocab_size, bins=256, hi_id=151642)
     print(f"[1.4] action token range: {action_tokenizer.action_token_id_range}", flush=True)
 
     synthetic_actions = np.random.uniform(

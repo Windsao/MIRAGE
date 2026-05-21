@@ -201,7 +201,7 @@ def main() -> None:
     ).to(device).to(weight_dtype)
     model.eval()
 
-    action_tokenizer = ActionTokenizer(vocab_size=vocab_size, bins=256)
+    action_tokenizer = ActionTokenizer(vocab_size=vocab_size, bins=256, hi_id=151642)
     print(f"[2a.1] action token range: {action_tokenizer.action_token_id_range}", flush=True)
 
     # -- LIBERO env -------------------------------------------------------

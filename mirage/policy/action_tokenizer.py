@@ -37,6 +37,7 @@ class ActionTokenizer:
         bins: int = 256,
         min_action: float = -1.0,
         max_action: float = 1.0,
+        hi_id: int | None = None,
     ) -> None:
         if bins >= vocab_size:
             raise ValueError(f"bins={bins} must be < vocab_size={vocab_size}")
@@ -44,6 +45,18 @@ class ActionTokenizer:
         self.bins = int(bins)
         self.min_action = float(min_action)
         self.max_action = float(max_action)
+        # `hi_id` is the highest token ID used as an action bin. Default keeps
+        # the OpenVLA convention (last `bins` tokens). For models whose tail of
+        # vocab holds chat/structure special tokens (Qwen2.5: 151643..151668),
+        # pass `hi_id` *below* that block (e.g. 151642) so the base-model's
+        # strong priors on `<|im_end|>`-style tokens don't dominate the action
+        # logits.
+        self.hi_id = int(hi_id) if hi_id is not None else self.vocab_size - 1
+        if self.hi_id < self.bins - 1 or self.hi_id >= self.vocab_size:
+            raise ValueError(
+                f"hi_id={self.hi_id} out of range for bins={self.bins}, "
+                f"vocab_size={self.vocab_size}"
+            )
 
         # Bin edges and bin centers (np for digitize; tensor versions cached lazily).
         self._edges = np.linspace(self.min_action, self.max_action, self.bins + 1)
@@ -54,8 +67,8 @@ class ActionTokenizer:
     @property
     def action_token_id_range(self) -> tuple[int, int]:
         """Inclusive [lo, hi] range of token IDs reserved as action bins."""
-        hi = self.vocab_size - 1
-        lo = self.vocab_size - self.bins
+        hi = self.hi_id
+        lo = self.hi_id - self.bins + 1
         return lo, hi
 
     def is_action_token(self, token_id: int) -> bool:
@@ -81,7 +94,7 @@ class ActionTokenizer:
         # digitize is 1-indexed; subtract 1 to get [0, bins-1].
         bin_idx = np.digitize(a, self._edges) - 1
         bin_idx = np.clip(bin_idx, 0, self.bins - 1)
-        token_ids = self.vocab_size - 1 - bin_idx
+        token_ids = self.hi_id - bin_idx
         return token_ids.astype(np.int64)
 
     # --- tokens -> actions -------------------------------------------------
@@ -96,7 +109,7 @@ class ActionTokenizer:
         t = np.asarray(token_ids.detach().cpu() if torch.is_tensor(token_ids) else token_ids,
                        dtype=np.int64)
         lo, hi = self.action_token_id_range
-        bin_idx = self.vocab_size - 1 - t
+        bin_idx = self.hi_id - t
         valid = (t >= lo) & (t <= hi)
         out = np.full(t.shape, np.nan, dtype=np.float32)
         out[valid] = self._centers[bin_idx[valid]]

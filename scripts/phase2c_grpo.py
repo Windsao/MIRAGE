@@ -242,14 +242,21 @@ def teacher_force_logprobs(model, prefix_embeds, modality_positions,
 
 def rollout_one(env, model, vae, text_tokenizer, showo_token_ids, config,
                 device, weight_dtype, action_tokenizer, task_text,
-                num_chunks: int, max_steps: int, temperature: float):
+                num_chunks: int, max_steps: int, temperature: float, init_state=None):
     """One rollout. Returns
         (success, total_steps, chunk_prefixes, chunk_modality_positions,
          chunk_action_token_ids).
     The lists are aligned and let us recompute log-probs on the saved
     (prefix, target_tokens) pairs for the GRPO update.
     """
-    obs = env.reset()
+    env.reset()
+    if init_state is not None:
+        env.set_init_state(init_state)
+    obs = None
+    for _ in range(10):
+        zero = np.zeros(7, dtype=np.float32)
+        zero[-1] = -1.0
+        obs, _r, _d, _info = env.step(zero)
     prefixes: list[torch.Tensor] = []
     mod_positions: list[torch.Tensor] = []
     action_token_seqs: list[torch.Tensor] = []
@@ -336,7 +343,7 @@ def main() -> None:
         model.load_state_dict(state["model_state"])
     model.train()
 
-    action_tokenizer = ActionTokenizer(vocab_size=vocab_size, bins=256)
+    action_tokenizer = ActionTokenizer(vocab_size=vocab_size, bins=256, hi_id=151642)
 
     bd = benchmark.get_benchmark_dict()
     spatial = bd["libero_spatial"]()
@@ -357,12 +364,15 @@ def main() -> None:
         prefixes_all: list[list[torch.Tensor]] = []
         modp_all: list[list[torch.Tensor]] = []
         tokens_all: list[list[torch.Tensor]] = []
+        init_states = spatial.get_task_init_states(args.task_idx)
         for k in range(args.group_size):
             t0 = time.time()
+            init_state = init_states[k % len(init_states)]
             succ, n_steps, prefs, modps, toks = rollout_one(
                 env, model, vae, text_tokenizer, showo_token_ids, config,
                 device, weight_dtype, action_tokenizer, t.language,
                 args.num_chunks, args.max_steps, args.temperature,
+                init_state=init_state,
             )
             successes.append(int(succ))
             prefixes_all.append(prefs)
@@ -425,10 +435,20 @@ def main() -> None:
             "grad_norm": float(gn),
         })
 
-    # save final state + summary
-    final_ckpt = save_dir / "grpo_final.pt"
-    torch.save({"step": args.num_steps, "model_state": model.state_dict(),
-                "args": vars(args)}, final_ckpt)
+    # save final state + summary. If LoRA was used, save adapter dir so eval can
+    # auto-detect; else save full state_dict as a .pt.
+    from peft import PeftModel
+    if isinstance(model.showo, PeftModel):
+        final_dir = save_dir / f"grpo_step_{args.num_steps}_lora"
+        print(f"[2c] saving LoRA adapter to {final_dir}", flush=True)
+        model.showo.save_pretrained(str(final_dir))
+        torch.save({"step": args.num_steps, "args": vars(args)},
+                   final_dir / "meta.pt")
+        final_ckpt = final_dir
+    else:
+        final_ckpt = save_dir / "grpo_final.pt"
+        torch.save({"step": args.num_steps, "model_state": model.state_dict(),
+                    "args": vars(args)}, final_ckpt)
     with open(save_dir / "summary.json", "w") as f:
         json.dump({"task": t.language, "group_size": args.group_size,
                    "num_steps": args.num_steps, "steps": step_summaries}, f, indent=2)

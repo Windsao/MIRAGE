@@ -188,8 +188,17 @@ def sample_action_chunks(model, prefix_embeds, modality_positions, action_tokeni
 
 def run_trial(env, model, vae, text_tokenizer, showo_token_ids, config,
               device, weight_dtype, action_tokenizer, task_text, max_steps,
-              num_chunks, temperature):
-    obs = env.reset()
+              num_chunks, temperature, init_state=None):
+    env.reset()
+    if init_state is not None:
+        env.set_init_state(init_state)
+    # Stabilize the initial config with a few zero / gripper-open dummy steps
+    # (matches LIBERO/OpenVLA-OFT convention).
+    obs = None
+    for _ in range(10):
+        zero = np.zeros(7, dtype=np.float32)
+        zero[-1] = -1.0  # gripper open
+        obs, _r, _d, _info = env.step(zero)
     success = False
     total_steps = 0
     while total_steps < max_steps:
@@ -208,7 +217,6 @@ def run_trial(env, model, vae, text_tokenizer, showo_token_ids, config,
         for k in range(num_chunks):
             if total_steps >= max_steps:
                 break
-            # Skip NaNs from out-of-range tokens (shouldn't happen with constrained sampling).
             act = chunks[k]
             if not np.all(np.isfinite(act)):
                 act = np.nan_to_num(act, nan=0.0)
@@ -266,7 +274,7 @@ def main() -> None:
             model.load_state_dict(state["model_state"])
             print(f"[2b-eval] loaded full state from step={state.get('step')}", flush=True)
     model.eval()
-    action_tokenizer = ActionTokenizer(vocab_size=vocab_size, bins=256)
+    action_tokenizer = ActionTokenizer(vocab_size=vocab_size, bins=256, hi_id=151642)
 
     bd = benchmark.get_benchmark_dict()
     spatial = bd["libero_spatial"]()
@@ -283,11 +291,14 @@ def main() -> None:
 
         succ_list: list[int] = []
         len_list: list[int] = []
+        init_states = spatial.get_task_init_states(task_idx)
         for trial in range(args.trials_per_task):
+            init_state = init_states[trial % len(init_states)]
             success, steps = run_trial(
                 env, model, vae, text_tokenizer, showo_token_ids, config,
                 device, weight_dtype, action_tokenizer,
                 t.language, args.max_steps, args.num_chunks, args.temperature,
+                init_state=init_state,
             )
             succ_list.append(int(success))
             len_list.append(steps)

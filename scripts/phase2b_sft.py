@@ -120,7 +120,7 @@ def build_components(device, weight_dtype, lora_rank: int = 0):
         print(f"[2b] LoRA rank={lora_rank}  trainable={trainable/1e6:.1f}M / {total/1e6:.0f}M "
               f"({100 * trainable / total:.2f}%)", flush=True)
     model.train()
-    action_tokenizer = ActionTokenizer(vocab_size=vocab_size, bins=256)
+    action_tokenizer = ActionTokenizer(vocab_size=vocab_size, bins=256, hi_id=151642)
     return config, text_tokenizer, showo_token_ids, vae, model, action_tokenizer
 
 
