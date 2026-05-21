@@ -107,6 +107,11 @@ def build_components(device, weight_dtype, lora_rank: int = 0):
             task_type="CAUSAL_LM",
             target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
                             "gate_proj", "up_proj", "down_proj"],
+            # Make lm_head + embed_tokens fully trainable so the model can
+            # actually reshape the output distribution over action tokens.
+            # Without this, LoRA on attn/MLP can"t override the LM"s strong
+            # priors on common tokens, causing mode collapse to a single bin.
+            modules_to_save=["lm_head", "embed_tokens"],
         )
         # Wrap only the Qwen2 LM. Image-side modules (image_embedder_und/gen,
         # und_trans, fusion_proj, position_embedding) stay frozen.

@@ -38,8 +38,8 @@ from mirage.data import libero_spatial_dataset  # noqa: E402
 
 CONFIG_PATH = Path("/home/mzh1800/MIRAGE/configs/showo2_smoke.yaml")
 DATASET_DIR = Path("/nyx-storage1/hanliu/envs/mirage_venv/libero/libero/datasets")
-CKPT = Path("/nyx-storage1/hanliu/mirage_ckpts/phase2b_lora_10k/sft_step_10000_lora")
-NUM_CHUNKS = 8
+CKPT = Path("/nyx-storage1/hanliu/mirage_ckpts/phase2b_lora_chunk1/sft_step_30000_lora")
+NUM_CHUNKS = 1
 ACTION_DIM = 7
 NUM_PROBE = 10
 TOTAL = NUM_CHUNKS * ACTION_DIM
