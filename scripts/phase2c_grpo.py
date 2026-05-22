@@ -172,6 +172,7 @@ def sample_action_chunks(model, prefix_embeds, modality_positions, action_tokeni
                 diagonal=1,
             )
             attn[:, :, L_prefix:, L_prefix:] = causal
+            attn[:, :, :L_prefix, L_prefix:] = neg  # block prefix->action (consistency with SFT)
         attn = attn.to(weight_dtype)
 
         out = model.showo(inputs_embeds=cur_embeds, attention_mask=attn)
@@ -228,6 +229,7 @@ def teacher_force_logprobs(model, prefix_embeds, modality_positions,
         diagonal=1,
     )
     attn[:, :, L_prefix:, L_prefix:] = causal
+    attn[:, :, :L_prefix, L_prefix:] = neg  # block prefix->action (match SFT)
     attn = attn.to(weight_dtype)
 
     out = model.showo(inputs_embeds=input_embeds, attention_mask=attn)

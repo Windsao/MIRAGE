@@ -96,6 +96,7 @@ def greedy_sample(model, prefix, mp, atok, device, dtype):
         if n > 0:
             causal = torch.triu(torch.full((n, n), neg, device=device, dtype=torch.long), diagonal=1)
             attn[:, :, L0:, L0:] = causal
+            attn[:, :, :L0, L0:] = neg
         attn = attn.to(dtype)
         out = model.showo(inputs_embeds=cur, attention_mask=attn)
         logits = out.logits[:, -1, :].float()

@@ -212,6 +212,12 @@ def build_one_input(model, vae, text_tokenizer, showo_token_ids, config,
         diagonal=1,
     )
     attn[:, :, L_prefix:, L_prefix:] = causal
+    # BUG FIX: prefix positions must NOT attend to future action tokens.
+    # Without this the last prefix position (which predicts the first action
+    # token via teacher forcing) sees the GT labels through attention and
+    # trivially drives train loss to 0 — at eval there are no future tokens
+    # to leak from, so the model collapses to MLE/mode predictions.
+    attn[:, :, :L_prefix, L_prefix:] = neg
     attn = attn.to(weight_dtype)
     return input_embeds, attn, L_prefix
 
