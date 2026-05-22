@@ -336,13 +336,15 @@ def main() -> None:
             model.showo, str(ckpt_path), is_trainable=True,
         )
         model = model.to(device).to(weight_dtype)
-        # Freeze non-LoRA params (they were frozen during SFT).
+        # peft already sets requires_grad correctly: LoRA layers and
+        # modules_to_save (lm_head.modules_to_save.default / embed_tokens
+        # .modules_to_save.default) are trainable; everything else frozen.
+        # Just freeze image-side modules outside showo for safety.
         for n, p in model.named_parameters():
-            if "showo" not in n or "lora_" not in n.lower():
-                if "lora_" not in n.lower():
-                    p.requires_grad = False
+            if "showo" not in n:
+                p.requires_grad = False
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"[2c] LoRA mode: trainable={trainable/1e6:.1f}M", flush=True)
+        print(f"[2c] peft-managed trainable={trainable/1e6:.1f}M", flush=True)
     else:
         state = torch.load(args.ckpt, map_location=device)
         model.load_state_dict(state["model_state"])
@@ -398,15 +400,18 @@ def main() -> None:
         if torch.allclose(rewards, rewards[0]):
             print("[2c] group rewards identical; advantage=0, no learning signal this step", flush=True)
 
-        # Recompute log-probs with grad for each (prefix, tokens) and apply
-        # policy-gradient loss weighted by per-rollout advantage.
-        total_loss = torch.zeros((), device=device, dtype=torch.float32)
-        n_inferences = 0
+        # Gradient accumulation: backward per (rollout, timestep) so we never
+        # hold the full multi-step graph in memory. Mathematically equivalent
+        # to summing -adv_k * traj_lp / n_inferences.
+        total_inferences = sum(len(tokens_all[k]) for k in range(args.group_size)
+                                if advantages[k].item() != 0)
+        total_loss_val = 0.0
+        optim.zero_grad(set_to_none=True)
+        had_grad = False
         for k in range(args.group_size):
             adv_k = advantages[k].item()
             if adv_k == 0:
                 continue
-            traj_lp = torch.zeros((), device=device, dtype=torch.float32)
             for prefix_embeds, mod_pos, tokens in zip(
                 prefixes_all[k], modp_all[k], tokens_all[k],
             ):
@@ -414,18 +419,19 @@ def main() -> None:
                     model, prefix_embeds, mod_pos, tokens, action_tokenizer,
                     device, weight_dtype,
                 )
-                traj_lp = traj_lp + lp
-                n_inferences += 1
-            total_loss = total_loss + (-adv_k * traj_lp)
-        total_loss = total_loss / max(n_inferences, 1)
-
-        optim.zero_grad(set_to_none=True)
-        if total_loss.requires_grad:
-            total_loss.backward()
+                step_loss = -adv_k * lp / max(total_inferences, 1)
+                if step_loss.requires_grad:
+                    step_loss.backward()
+                    had_grad = True
+                total_loss_val += float(step_loss.detach())
+                del lp, step_loss
+                torch.cuda.empty_cache()
+        if had_grad:
             gn = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         else:
             gn = torch.tensor(0.0)
         optim.step()
+        total_loss = torch.tensor(total_loss_val)
 
         success_rate = float(np.mean(successes))
         print(
