@@ -50,7 +50,9 @@ from datasets.utils import image_transform                                      
 from libero.libero import benchmark, get_libero_path                             # noqa: E402
 from libero.libero.envs import OffScreenRenderEnv                                # noqa: E402
 
-from mirage.policy import ActionTokenizer                                        # noqa: E402
+from mirage.policy import ActionTokenizer, ActionNormalizer                      # noqa: E402
+
+ACTION_STATS_PATH = "/nyx-storage1/hanliu/mirage_ckpts/action_stats.json"
 
 CONFIG_PATH = Path("/home/mzh1800/MIRAGE/configs/showo2_smoke.yaml")
 ACTION_DIM = 7
@@ -188,7 +190,7 @@ def sample_action_chunks(model, prefix_embeds, modality_positions, action_tokeni
 
 
 def run_trial(env, model, vae, text_tokenizer, showo_token_ids, config,
-              device, weight_dtype, action_tokenizer, task_text, max_steps,
+              device, weight_dtype, action_tokenizer, action_normalizer, task_text, max_steps,
               num_chunks, temperature, init_state=None):
     env.reset()
     if init_state is not None:
@@ -221,7 +223,9 @@ def run_trial(env, model, vae, text_tokenizer, showo_token_ids, config,
             act = chunks[k]
             if not np.all(np.isfinite(act)):
                 act = np.nan_to_num(act, nan=0.0)
-            obs, reward, done, info = env.step(act.astype(np.float32))
+            # Decoded actions are in normalized [-1,1]; map back to raw units.
+            act_raw = action_normalizer.denormalize(act).astype(np.float32)
+            obs, reward, done, info = env.step(act_raw)
             total_steps += 1
             if done:
                 break
@@ -276,6 +280,7 @@ def main() -> None:
             print(f"[2b-eval] loaded full state from step={state.get('step')}", flush=True)
     model.eval()
     action_tokenizer = ActionTokenizer(vocab_size=vocab_size, bins=256, hi_id=151642)
+    action_normalizer = ActionNormalizer.from_json(ACTION_STATS_PATH)
 
     bd = benchmark.get_benchmark_dict()
     spatial = bd["libero_spatial"]()
@@ -297,7 +302,7 @@ def main() -> None:
             init_state = init_states[trial % len(init_states)]
             success, steps = run_trial(
                 env, model, vae, text_tokenizer, showo_token_ids, config,
-                device, weight_dtype, action_tokenizer,
+                device, weight_dtype, action_tokenizer, action_normalizer,
                 t.language, args.max_steps, args.num_chunks, args.temperature,
                 init_state=init_state,
             )

@@ -31,7 +31,7 @@ from mirage.data import libero_spatial_dataset  # noqa: E402
 
 CONFIG_PATH = Path("/home/mzh1800/MIRAGE/configs/showo2_smoke.yaml")
 DATASET_DIR = Path("/nyx-storage1/hanliu/envs/mirage_venv/libero/libero/datasets")
-CKPT = Path("/nyx-storage1/hanliu/mirage_ckpts/phase2b_lora_chunk1_lmhead/sft_step_30000_lora")
+CKPT = Path("/nyx-storage1/hanliu/mirage_ckpts/phase2b_lora_v5_attnfix/sft_step_30000_lora")
 N = 10
 
 

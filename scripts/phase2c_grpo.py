@@ -60,7 +60,9 @@ from datasets.utils import image_transform                                      
 from libero.libero import benchmark, get_libero_path                             # noqa: E402
 from libero.libero.envs import OffScreenRenderEnv                                # noqa: E402
 
-from mirage.policy import ActionTokenizer                                        # noqa: E402
+from mirage.policy import ActionTokenizer, ActionNormalizer                      # noqa: E402
+
+ACTION_STATS_PATH = "/nyx-storage1/hanliu/mirage_ckpts/action_stats.json"
 
 CONFIG_PATH = Path("/home/mzh1800/MIRAGE/configs/showo2_smoke.yaml")
 ACTION_DIM = 7
@@ -243,7 +245,7 @@ def teacher_force_logprobs(model, prefix_embeds, modality_positions,
 
 
 def rollout_one(env, model, vae, text_tokenizer, showo_token_ids, config,
-                device, weight_dtype, action_tokenizer, task_text,
+                device, weight_dtype, action_tokenizer, action_normalizer, task_text,
                 num_chunks: int, max_steps: int, temperature: float, init_state=None):
     """One rollout. Returns
         (success, total_steps, chunk_prefixes, chunk_modality_positions,
@@ -286,7 +288,8 @@ def rollout_one(env, model, vae, text_tokenizer, showo_token_ids, config,
             act = chunks[k]
             if not np.all(np.isfinite(act)):
                 act = np.nan_to_num(act, nan=0.0)
-            obs, reward, done, info = env.step(act.astype(np.float32))
+            act_raw = action_normalizer.denormalize(act).astype(np.float32)
+            obs, reward, done, info = env.step(act_raw)
             total_steps += 1
             if done:
                 break
@@ -346,6 +349,7 @@ def main() -> None:
     model.train()
 
     action_tokenizer = ActionTokenizer(vocab_size=vocab_size, bins=256, hi_id=151642)
+    action_normalizer = ActionNormalizer.from_json(ACTION_STATS_PATH)
 
     bd = benchmark.get_benchmark_dict()
     spatial = bd["libero_spatial"]()
@@ -372,7 +376,7 @@ def main() -> None:
             init_state = init_states[k % len(init_states)]
             succ, n_steps, prefs, modps, toks = rollout_one(
                 env, model, vae, text_tokenizer, showo_token_ids, config,
-                device, weight_dtype, action_tokenizer, t.language,
+                device, weight_dtype, action_tokenizer, action_normalizer, t.language,
                 args.num_chunks, args.max_steps, args.temperature,
                 init_state=init_state,
             )

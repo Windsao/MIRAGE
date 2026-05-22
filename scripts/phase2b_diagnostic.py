@@ -33,7 +33,9 @@ from models.misc import get_text_tokenizer  # noqa: E402
 from utils import get_hyper_params, path_to_llm_name  # noqa: E402
 from datasets.utils import image_transform  # noqa: E402
 
-from mirage.policy import ActionTokenizer  # noqa: E402
+from mirage.policy import ActionTokenizer, ActionNormalizer  # noqa: E402
+
+ACTION_STATS_PATH = "/nyx-storage1/hanliu/mirage_ckpts/action_stats.json"
 from mirage.data import libero_spatial_dataset  # noqa: E402
 
 CONFIG_PATH = Path("/home/mzh1800/MIRAGE/configs/showo2_smoke.yaml")
@@ -136,6 +138,7 @@ def main() -> None:
     model.eval()
 
     atok = ActionTokenizer(vocab_size=V, bins=256, hi_id=151642)
+    anorm = ActionNormalizer.from_json(ACTION_STATS_PATH)
     lo, hi = atok.action_token_id_range
     print(f"[diag] action token range = [{lo}, {hi}]  (bins=256, V={V})", flush=True)
 
@@ -151,13 +154,15 @@ def main() -> None:
     print("=" * 80)
     for k, idx in enumerate(probe_ids):
         ex = ds[int(idx)]
-        gt_action = ex["action"].astype(np.float32)  # [C, 7]
-        gt_flat = gt_action.reshape(-1)
+        gt_action = ex["action"].astype(np.float32)  # [C, 7] raw
+        gt_action_norm = anorm.normalize(gt_action)
+        gt_flat = gt_action_norm.reshape(-1)
         gt_tokens = atok.encode(gt_flat).astype(np.int64)  # [56]
         prefix, mp = build_prefix(model, vae, tok, sids, cfg, device, dtype,
                                   ex["image"], ex["task"])
         pred_tokens = greedy_sample(model, prefix, mp, atok, device, dtype)
-        pred_action = atok.decode(pred_tokens).reshape(NUM_CHUNKS, ACTION_DIM).astype(np.float32)
+        pred_action_norm = atok.decode(pred_tokens).reshape(NUM_CHUNKS, ACTION_DIM).astype(np.float32)
+        pred_action = anorm.denormalize(pred_action_norm)
 
         mse = float(np.mean((pred_action - gt_action) ** 2))
         per_chunk_mse.append(mse)

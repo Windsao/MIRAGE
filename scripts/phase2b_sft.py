@@ -48,8 +48,10 @@ from models.misc import get_text_tokenizer                                      
 from utils import get_hyper_params, path_to_llm_name                             # noqa: E402
 from datasets.utils import image_transform                                       # noqa: E402
 
-from mirage.policy import ActionTokenizer                                        # noqa: E402
+from mirage.policy import ActionTokenizer, ActionNormalizer                      # noqa: E402
 from mirage.data import libero_spatial_dataset                                   # noqa: E402
+
+ACTION_STATS_PATH = "/nyx-storage1/hanliu/mirage_ckpts/action_stats.json"
 
 CONFIG_PATH = Path("/home/mzh1800/MIRAGE/configs/showo2_smoke.yaml")
 DATASET_DIR = Path("/nyx-storage1/hanliu/envs/mirage_venv/libero/libero/datasets")
@@ -248,6 +250,8 @@ def main() -> None:
     config, text_tokenizer, showo_token_ids, vae, model, action_tokenizer = (
         build_components(device, weight_dtype, lora_rank=args.lora_rank)
     )
+    action_normalizer = ActionNormalizer.from_json(ACTION_STATS_PATH)
+    print(f"[2b] loaded action normalizer (q01={action_normalizer.q01.tolist()})", flush=True)
 
     optim = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad],
@@ -276,7 +280,10 @@ def main() -> None:
         action_np = batch["action"][0].numpy()                          # [C, 7] or [7]
         task_text = batch["task"][0]
         # Flatten time-major: dims of chunk 0, then chunk 1, ... -> [C*7]
-        flat = action_np.reshape(-1) if action_np.ndim > 1 else action_np
+        # Normalize per-dim before tokenizing so all dims use the full bin range.
+        # action_np shape is [C, 7] (chunk) or [7] (single).
+        action_norm = action_normalizer.normalize(action_np)            # same shape
+        flat = action_norm.reshape(-1) if action_norm.ndim > 1 else action_norm
         action_token_ids = torch.from_numpy(
             action_tokenizer.encode(flat)
         ).to(device).long()                                            # [C*7]
